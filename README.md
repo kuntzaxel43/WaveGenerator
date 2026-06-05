@@ -9,7 +9,7 @@ This project is a hybrid function generator. A **STM32 Nucleo** (C/C++) acts as 
 
 Unlike purely software-based solutions, FPGA hardware enables signal generation with extremely low jitter and high frequency stability because the logic operates in parallel and is clock-accurate.
 
-### System Architecture
+## Software and System Architecture
 
 1. **STM32 (Control Plane):** Manages the user interface (rotary encoder, display) and calculates the increment values for the target frequency.
 2. **SPI Bus:** The bridge between the two worlds. The STM32 configures the FPGA like a custom chip.
@@ -17,6 +17,121 @@ Unlike purely software-based solutions, FPGA hardware enables signal generation 
 4. **R2R DAC:** A discrete resistor network that converts the 8-bit digital values into an analog voltage.
 
 ---
+
+## 🧠 Software-Architektur (FreeRTOS)
+
+Das STM32-System läuft auf Basis von **FreeRTOS**, um eine modulare, ereignisgesteuerte und echtzeitfähige Steuerung zu garantieren. Die Tasks sind strikt nach ihrer zeitlichen Dringlichkeit (Priorität) aufgeteilt.
+
+The STM32-System runs on base of an **FreeRTOS** ensure modular, event-driven, and real-time-capable control. The tasks a strictly divded o their temporal urgency (priority).
+
+### Task Specification
+
+#### 1. UI-Input Task (Highest Priority)
+* **Objective:** Processes user inputs from the rotary encoder without missing any steps.
+* **Synchronization:** Remains suspended until it receives data via a **FreeRTOS Queue** from the hardware ISR (External Interrupt) of the encoder.
+* **Behavior:** Upon waking up, it immediately calculates the new $\Delta Phase$ value and triggers the Control Task.
+
+#### 2. Control & Communication Task (Medium Priority)
+* **Objective:** Transmits the calculated frequency parameters to the FPGA.
+* **Synchronization:** Triggered via an **Event Flag / Semaphore** by the UI-Input Task.
+* **Efficiency:** Utilizes **SPI via DMA**. The task blocks itself during the hardware transmission, freeing up CPU time until the DMA Transfer Complete interrupt wakes it back up.
+
+#### 3. Display & Menu Task (Low Priority)
+* **Objective:** Updates the menu structure and renders the OLED screen via I2C.
+* **Behavior:** Periodical task (`osDelay` of ~50ms / 20 Hz). Since I2C transfers are slow, this task decouples the sluggish display hardware entirely from the fast UI inputs.
+
+#### 4. Default / Idle Task (Lowest Priority)
+* **Objective:** System monitoring, flashing the status LED ("Heartbeat"), and optional output of runtime statistics via UART.
+
+# 🔍 Deep Dive: Task Implementation & Under the Hood Mechanics
+
+This section provides a detailed look at the internal mechanics, execution flow, and OS primitives used for each FreeRTOS task within the STM32 Signal Generator.
+
+---
+
+## 1. UI-Input Task: High-Speed Encoder Processing
+
+The primary challenge of this task is capturing rapid rotary encoder rotations without causing CPU starvation or losing critical physical steps.
+
+### Execution Flow
+```mermaid
+graph TD
+    A[Encoder Hardware] -->|Ext. Interrupt / EXTI| B[Interrupt Service Routine ISR]
+    B -->|osMessageQueuePut from ISR| C[RTOS Message Queue]
+    C -->|Wakes up via osMessageQueueGet| D[UI-Input Task]
+    D -->|Calculates ΔPhase| E[Triggers Comm Task]
+```
+
+* **The ISR Trigger:** The rotary encoder pins (CLK/DT) are configured as external hardware interrupts (`EXTI`). On every falling edge, the ISR evaluates the pin states to determine the rotation direction (`+1` or `-1`).
+* **Non-Blocking Queue Push:** The ISR pushes this direction integer into a FreeRTOS Queue using `osMessageQueuePut`. This function is specifically designed for ISRs, completing in a few nanoseconds without blocking the processor.
+* **Task Awakening:** The UI-Input Task spends 99% of its time in a blocked state, consuming zero CPU cycles while waiting at `osMessageQueueGet`. The moment an item enters the queue, the FreeRTOS scheduler immediately preempts lower-priority tasks and wakes this task up.
+* **Delta Phase Calculation:** The task updates the virtual frequency counter, applies boundaries (e.g., 10 Hz to 100 kHz), and calculates the new 32-bit Δ Phase tuning word for the FPGA using floating-point math. Finally, it signals the Communication Task.
+
+---
+
+## 2. Control & Communication Task: Non-Blocking DMA Transfers
+
+This task acts as the bridge to the FPGA. It must react immediately to frequency changes but avoid wasting CPU cycles waiting for slow hardware buses.
+
+### Execution Flow
+```mermaid
+graph TD
+    A[UI-Input Task] -->|Signals Event Flag| B[Control Task]
+    B -->|Start SPI via DMA| C[DMA Transfer Running]
+    C -->|Task Blocks / Yields CPU| D[FreeRTOS Sheduler Shifts Context]
+    E[SPI DMA Interrupt] -->|Hardware Finish / ISR Signals| B
+```
+
+* **Event-Driven Execution:** This task blocks on a FreeRTOS **Event Flag** or **Semaphore**. It only wakes up when the UI-Input Task signals that a new frequency calculation is ready for transmission.
+* **DMA Offloading:** Instead of shifting bits manually in a `while`-loop (polling SPI), the task utilizes **Direct Memory Access (DMA)** via `HAL_SPI_Transmit_DMA`. The CPU tells the DMA controller: *"Take these 4 bytes from RAM and push them to the SPI hardware."*
+* **Yielding the CPU:** Immediately after triggering the DMA, the task calls a blocking OS primitive. The FreeRTOS scheduler context-switches to other tasks (like rendering the display) while the hardware shifts the data.
+* **The Return:** Once the hardware finishes sending the 4 bytes, the SPI-DMA controller triggers a global hardware interrupt. The DMA ISR clears the flag and unblocks the Control Task, which safely goes back to sleep until the next user input.
+
+---
+
+## 3. Display & Menu Task: Decoupled UI Refresh
+
+I2C communication is inherently slow and would ruin the responsiveness of the encoder if coupled together. This task strictly separates the "state" from the "visuals".
+
+### Execution Flow
+```mermaid
+graph LR
+    A[Every 50ms TIM] --> B[Wakes up Display Task]
+    B --> C[Reads Shared RAM Variables]
+    C --> D[Writes Framebuffer via I2C]
+    D --> E[Task Sleeps / osDelayUntil]
+```
+
+* **Fixed Frame Rate:** The task utilizes `osDelayUntil` to wake up precisely every 50 milliseconds. This enforces a steady **20 Hz refresh rate**, which is perfectly fluid for the human eye while leaving ample time for the system to process inputs.
+* **Thread-Safe Data Reading:** To prevent "screen tearing" (reading a frequency value that is currently being modified by the UI task), this task reads the system state into a local buffer. *Note: For advanced data structures, a Mutex or critical section ensures data integrity during this quick read.*
+* **Pixel Buffering:** The task draws the UI elements (text, frequency values, lines) into an internal RAM frame buffer (1024 bytes for a 128x64 OLED). Once the frame is complete, it transmits the buffer via I2C to the SSD1306 controller.
+
+---
+
+## 4. Default Task: System Health & Telemetry
+
+This low-priority task catches any remaining CPU cycles to perform background maintenance and monitoring.
+
+* **Heartbeat Toggle:** It blinks an onboard LED at a steady 1 Hz rate. If the LED stops blinking, it serves as a visual indicator to the developer that an RTOS deadlock or hard fault has occurred.
+* **CPU Stack & Runtime Statistics:** If configured, this task calls `vTaskGetRunTimeStats()` periodically to monitor how much CPU time each thread consumes and checks for stack overflows.
+
+
+---
+
+## 1. UI-Input Task: High-Speed Encoder Processing
+
+The primary challenge of this task is capturing rapid rotary encoder rotations without causing CPU starvation or losing critical physical steps. 
+
+
+
+---
+
+### ⚠️ Real-Time Exception: ADC Oscilloscope ("Project within a Project")
+To keep signal sampling jitter to an absolute minimum, the optional ADC sampling runs **completely outside the RTOS scheduler**:
+1. A **hardware timer** triggers the ADC at exact periodic intervals.
+2. The **DMA** writes the measured values directly into a RAM buffer.
+3. Once the buffer is full, a DMA interrupt signals the *Control & Comm Task* to send the accumulated data to the PC via UART.
+
 
 ## 🛠 Hardware Requirements
 
