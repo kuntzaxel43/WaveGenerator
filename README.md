@@ -18,120 +18,114 @@ Unlike purely software-based solutions, FPGA hardware enables signal generation 
 
 ---
 
-## 🧠 Software-Architektur (FreeRTOS)
+## 🧠 Software Architecture (FreeRTOS)
 
-Das STM32-System läuft auf Basis von **FreeRTOS**, um eine modulare, ereignisgesteuerte und echtzeitfähige Steuerung zu garantieren. Die Tasks sind strikt nach ihrer zeitlichen Dringlichkeit (Priorität) aufgeteilt.
-
-The STM32-System runs on base of an **FreeRTOS** ensure modular, event-driven, and real-time-capable control. The tasks a strictly divded o their temporal urgency (priority).
+The STM32 system runs on **FreeRTOS** to provide modular, event-driven, and real-time-capable control. The tasks are strictly separated according to their urgency and priority.
 
 ### Task Specification
 
-#### 1. UI-Input Task (Highest Priority)
+#### 1. UI Input Task (Highest Priority)
 * **Objective:** Processes user inputs from the rotary encoder without missing any steps.
-* **Synchronization:** Remains suspended until it receives data via a **FreeRTOS Queue** from the hardware ISR (External Interrupt) of the encoder.
-* **Behavior:** Upon waking up, it immediately calculates the new $\Delta Phase$ value and triggers the Control Task.
+* **Synchronization:** Remains suspended until it receives data via a **FreeRTOS queue** from the hardware ISR (external interrupt) of the encoder.
+* **Behavior:** When it wakes up, it immediately calculates the new $\Delta Phase$ value and triggers the control task.
 
-#### 2. Control & Communication Task (Medium Priority)
+#### 2. Control and Communication Task (Medium Priority)
 * **Objective:** Transmits the calculated frequency parameters to the FPGA.
-* **Synchronization:** Triggered via an **Event Flag / Semaphore** by the UI-Input Task.
-* **Efficiency:** Utilizes **SPI via DMA**. The task blocks itself during the hardware transmission, freeing up CPU time until the DMA Transfer Complete interrupt wakes it back up.
+* **Synchronization:** Triggered via a **FreeRTOS Event Flag (Event Group)** by the UI-Input Task upon any parameter change.
+* **Efficiency:** Uses **SPI via DMA**. The task blocks itself during the hardware transmission, freeing CPU time until the DMA transfer-complete interrupt wakes it again.
 
-#### 3. Display & Menu Task (Low Priority)
+#### 3. Display and Menu Task (Low Priority)
 * **Objective:** Updates the menu structure and renders the OLED screen via I2C.
-* **Behavior:** Periodical task (`osDelay` of ~50ms / 20 Hz). Since I2C transfers are slow, this task decouples the sluggish display hardware entirely from the fast UI inputs.
+* **Behavior:** Periodic task (`osDelay` of about 50 ms / 20 Hz). Since I2C transfers are slow, this task decouples the sluggish display hardware entirely from the fast UI inputs.
 
 #### 4. Default / Idle Task (Lowest Priority)
-* **Objective:** System monitoring, flashing the status LED ("Heartbeat"), and optional output of runtime statistics via UART.
+* **Objective:** System monitoring, flashing the status LED ("heartbeat"), and optional runtime statistics output via UART.
 
-# 🔍 Deep Dive: Task Implementation & Under the Hood Mechanics
+# 🔍 Deep Dive: Task Implementation and Under-the-Hood Mechanics
 
-This section provides a detailed look at the internal mechanics, execution flow, and OS primitives used for each FreeRTOS task within the STM32 Signal Generator.
+This section provides a detailed look at the internal mechanics, execution flow, and OS primitives used for each FreeRTOS task within the STM32 signal generator.
 
 ---
 
-## 1. UI-Input Task: High-Speed Encoder Processing
+## 1. UI Input Task: High-Speed Encoder Processing
 
-The primary challenge of this task is capturing rapid rotary encoder rotations without causing CPU starvation or losing critical physical steps.
+The primary challenge of this task is capturing rapid rotary-encoder rotations without causing CPU starvation or losing critical steps.
 
 ### Execution Flow
 ```mermaid
 graph TD
     A[Encoder Hardware] -->|Ext. Interrupt / EXTI| B[Interrupt Service Routine ISR]
     B -->|osMessageQueuePut from ISR| C[RTOS Message Queue]
-    C -->|Wakes up via osMessageQueueGet| D[UI-Input Task]
+    C -->|Wakes up via osMessageQueueGet| D[UI Input Task]
     D -->|Calculates ΔPhase| E[Triggers Comm Task]
 ```
 
-* **The ISR Trigger:** The rotary encoder pins (CLK/DT) are configured as external hardware interrupts (`EXTI`). On every falling edge, the ISR evaluates the pin states to determine the rotation direction (`+1` or `-1`).
-* **Non-Blocking Queue Push:** The ISR pushes this direction integer into a FreeRTOS Queue using `osMessageQueuePut`. This function is specifically designed for ISRs, completing in a few nanoseconds without blocking the processor.
-* **Task Awakening:** The UI-Input Task spends 99% of its time in a blocked state, consuming zero CPU cycles while waiting at `osMessageQueueGet`. The moment an item enters the queue, the FreeRTOS scheduler immediately preempts lower-priority tasks and wakes this task up.
-* **Delta Phase Calculation:** The task updates the virtual frequency counter, applies boundaries (e.g., 10 Hz to 100 kHz), and calculates the new 32-bit Δ Phase tuning word for the FPGA using floating-point math. Finally, it signals the Communication Task.
+* **The ISR trigger:** The rotary-encoder pins (CLK/DT) are configured as external hardware interrupts (`EXTI`). On every falling edge, the ISR evaluates the pin states to determine the rotation direction (`+1` or `-1`).
+* **Non-blocking queue push:** The ISR pushes this direction integer into a FreeRTOS queue using `osMessageQueuePut`. This function is specifically designed for ISRs and completes in a few nanoseconds without blocking the processor.
+* **Task awakening:** The UI input task spends most of its time in a blocked state, consuming zero CPU cycles while waiting at `osMessageQueueGet`. The moment an item enters the queue, the FreeRTOS scheduler immediately preempts lower-priority tasks and wakes this task up.
+* **Delta-phase calculation:** The task updates the virtual frequency counter, applies boundaries (for example, 10 Hz to 100 kHz), and calculates the new 32-bit Δ phase tuning word for the FPGA using floating-point math. Finally, it signals the communication task.
 
 ---
 
-## 2. Control & Communication Task: Non-Blocking DMA Transfers
+## 2. Control and Communication Task: Non-Blocking DMA Transfers
 
-This task acts as the bridge to the FPGA. It must react immediately to frequency changes but avoid wasting CPU cycles waiting for slow hardware buses.
+This task acts as the bridge to the FPGA. It must react immediately to frequency changes while avoiding wasted CPU cycles waiting for slow hardware buses.
 
 ### Execution Flow
 ```mermaid
 graph TD
-    A[UI-Input Task] -->|Signals Event Flag| B[Control Task]
+    A[UI-Input Task] -->|osEventFlagsSet| B[Control Task]
     B -->|Start SPI via DMA| C[DMA Transfer Running]
-    C -->|Task Blocks / Yields CPU| D[FreeRTOS Sheduler Shifts Context]
-    E[SPI DMA Interrupt] -->|Hardware Finish / ISR Signals| B
+    C -->|Task Blocks / Yields CPU| D[FreeRTOS Scheduler Shifts Context]
+    E[SPI DMA Interrupt] -->|Hardware Finish / ISR Signals Semaphore| B
 ```
 
-* **Event-Driven Execution:** This task blocks on a FreeRTOS **Event Flag** or **Semaphore**. It only wakes up when the UI-Input Task signals that a new frequency calculation is ready for transmission.
-* **DMA Offloading:** Instead of shifting bits manually in a `while`-loop (polling SPI), the task utilizes **Direct Memory Access (DMA)** via `HAL_SPI_Transmit_DMA`. The CPU tells the DMA controller: *"Take these 4 bytes from RAM and push them to the SPI hardware."*
-* **Yielding the CPU:** Immediately after triggering the DMA, the task calls a blocking OS primitive. The FreeRTOS scheduler context-switches to other tasks (like rendering the display) while the hardware shifts the data.
-* **The Return:** Once the hardware finishes sending the 4 bytes, the SPI-DMA controller triggers a global hardware interrupt. The DMA ISR clears the flag and unblocks the Control Task, which safely goes back to sleep until the next user input.
+* * **Event-Driven Execution:** This task blocks on a FreeRTOS **Event Flag (Event Group)** using `osEventFlagsWait`. It remains in a power-saving blocked state and only wakes up when the UI-Input Task sets the corresponding bit (e.g., `FLAG_FREQUENCY_CHANGED` or `FLAG_WAVEFORM_CHANGED`), ensuring immediate transmission without polling.
+* **DMA offloading:** Instead of shifting bits manually in a `while` loop (polling SPI), the task uses **Direct Memory Access (DMA)** via `HAL_SPI_Transmit_DMA`. The CPU tells the DMA controller: *"Take these 4 bytes from RAM and push them to the SPI hardware."*
+* **Yielding the CPU:** Immediately after triggering the DMA, the task calls a blocking OS primitive. The FreeRTOS scheduler switches context to other tasks (such as rendering the display) while the hardware shifts the data.
+* **The return:** Once the hardware finishes sending the 4 bytes, the SPI-DMA controller triggers a global hardware interrupt. The DMA ISR clears the flag and unblocks the control task, which safely goes back to sleep until the next user input.
 
 ---
 
-## 3. Display & Menu Task: Decoupled UI Refresh
+## 3. Display and Menu Task: Decoupled UI Refresh
 
 I2C communication is inherently slow and would ruin the responsiveness of the encoder if coupled together. This task strictly separates the "state" from the "visuals".
 
 ### Execution Flow
 ```mermaid
 graph LR
-    A[Every 50ms TIM] --> B[Wakes up Display Task]
+    A[Every 50 ms TIM] --> B[Wakes up Display Task]
     B --> C[Reads Shared RAM Variables]
     C --> D[Writes Framebuffer via I2C]
     D --> E[Task Sleeps / osDelayUntil]
 ```
 
-* **Fixed Frame Rate:** The task utilizes `osDelayUntil` to wake up precisely every 50 milliseconds. This enforces a steady **20 Hz refresh rate**, which is perfectly fluid for the human eye while leaving ample time for the system to process inputs.
-* **Thread-Safe Data Reading:** To prevent "screen tearing" (reading a frequency value that is currently being modified by the UI task), this task reads the system state into a local buffer. *Note: For advanced data structures, a Mutex or critical section ensures data integrity during this quick read.*
-* **Pixel Buffering:** The task draws the UI elements (text, frequency values, lines) into an internal RAM frame buffer (1024 bytes for a 128x64 OLED). Once the frame is complete, it transmits the buffer via I2C to the SSD1306 controller.
+* **Fixed frame rate:** The task uses `osDelayUntil` to wake up precisely every 50 milliseconds. This enforces a steady **20 Hz refresh rate**, which is perfectly fluid for the human eye while leaving ample time for the system to process inputs.
+* **Thread-safe data reading:** To prevent "screen tearing" (reading a frequency value that is currently being modified by the UI task), this task reads the system state into a local buffer. *Note: For advanced data structures, a mutex or critical section ensures data integrity during this quick read.*
+* **Pixel buffering:** The task draws the UI elements (text, frequency values, lines) into an internal RAM frame buffer (1024 bytes for a 128x64 OLED). Once the frame is complete, it transmits the buffer via I2C to the SSD1306 controller.
 
 ---
 
-## 4. Default Task: System Health & Telemetry
+## 4. Default Task: System Health and Telemetry
 
 This low-priority task catches any remaining CPU cycles to perform background maintenance and monitoring.
 
-* **Heartbeat Toggle:** It blinks an onboard LED at a steady 1 Hz rate. If the LED stops blinking, it serves as a visual indicator to the developer that an RTOS deadlock or hard fault has occurred.
-* **CPU Stack & Runtime Statistics:** If configured, this task calls `vTaskGetRunTimeStats()` periodically to monitor how much CPU time each thread consumes and checks for stack overflows.
-
-
----
-
-## 1. UI-Input Task: High-Speed Encoder Processing
-
-The primary challenge of this task is capturing rapid rotary encoder rotations without causing CPU starvation or losing critical physical steps. 
-
-
+* **Heartbeat toggle:** It blinks an onboard LED at a steady 1 Hz rate. If the LED stops blinking, it serves as a visual indicator to the developer that an RTOS deadlock or hard fault has occurred.
+* **CPU stack and runtime statistics:** If configured, this task calls `vTaskGetRunTimeStats()` periodically to monitor how much CPU time each thread consumes and checks for stack overflows.
 
 ---
 
-### ⚠️ Real-Time Exception: ADC Oscilloscope ("Project within a Project")
-To keep signal sampling jitter to an absolute minimum, the optional ADC sampling runs **completely outside the RTOS scheduler**:
+## 1. UI Input Task: High-Speed Encoder Processing
+
+The primary challenge of this task is capturing rapid rotary-encoder rotations without causing CPU starvation or losing critical steps.
+
+---
+
+### ⚠️ Real-Time Exception: ADC Oscilloscope ("Project Within a Project")
+To keep signal-sampling jitter to a minimum, the optional ADC sampling runs **completely outside the RTOS scheduler**:
 1. A **hardware timer** triggers the ADC at exact periodic intervals.
 2. The **DMA** writes the measured values directly into a RAM buffer.
-3. Once the buffer is full, a DMA interrupt signals the *Control & Comm Task* to send the accumulated data to the PC via UART.
-
+3. Once the buffer is full, a DMA interrupt signals the *control and communication task* to send the accumulated data to the PC via UART.
 
 ## 🛠 Hardware Requirements
 
@@ -167,23 +161,27 @@ To keep signal sampling jitter to an absolute minimum, the optional ADC sampling
 
 ### 1. SPI & Control (Nucleo to FPGA)
 
-| Signal      | Nucleo Pin (Arduino) | Nucleo Pin (Morpho) | Description                    |
-|-------------|----------------------|---------------------|--------------------------------|
-| **MOSI**    | D11                  | PA7                 | Data from STM32 -> FPGA        |
-| **MISO**    | D12                  | PA6                 | Data from FPGA -> STM32        |
-| **SCK**     | D13                  | PA5                 | SPI clock                      |
-| **CS / NSS**| D10                  | PB6                 | Chip select (active low)       |
-| **GND**     | GND                  | GND                 | Common reference ground        |
+For a practical CubeMX setup on the Nucleo-F767ZI, I recommend using the following pins. This keeps the SPI lines free from the board's default Ethernet routing and is easy to wire.
+
+| Signal      | Recommended CubeMX Pin | Arduino-style label | Description                    |
+|-------------|------------------------|---------------------|--------------------------------|
+| **MOSI**    | PB5                    | —                   | Data from STM32 -> FPGA        |
+| **MISO**    | PA6                    | D12                 | Data from FPGA -> STM32        |
+| **SCK**     | PA5                    | D13                 | SPI clock                      |
+| **CS / NSS**| PD14                   | D10                 | Chip select (active low)       |
+| **GND**     | GND                    | GND                 | Common reference ground        |
+
+Note: If you prefer the Arduino header labels, D11/PA7 is also a possible MOSI choice, but on the Nucleo-F767ZI it is commonly used by the Ethernet peripheral in the default board configuration. For a cleaner embedded setup, PB5 is the better choice.
 
 User interface connections
-The following pins connect the display and rotary encoder to the Nucleo.
+The following pins connect the display and rotary encoder to the Nucleo-F767ZI.
 
-| Component  | Nucleo Pin | Zio Connector Pin | Description             |
-|------------|------------|-------------------|-------------------------|
-| OLED SDA   | PB9        | CN7 - Pin 4 (D14) | I2C data line           |
-| OLED SCL   | PB8        | CN7 - Pin 2 (D15) | I2C clock line          |
-| Encoder A  | PF12       | CN7 - Pin 1       | Encoder phase A         |
-| Encoder B  | PF13       | CN7 - Pin 3       | Encoder phase B         |
+| Component  | Recommended CubeMX Pin | Description             |
+|------------|------------------------|-------------------------|
+| OLED SDA   | PB9                    | I2C data line           |
+| OLED SCL   | PB8                    | I2C clock line          |
+| Encoder A  | PF12                   | Encoder phase A         |
+| Encoder B  | PD15                   | Encoder phase B         |
 
 ### 2. R2R DAC (FPGA to resistor network)
 
@@ -241,8 +239,8 @@ The STM32 sends the value $\Delta Phase$ via SPI to the FPGA, which then adjusts
 ## Bill of Materials
 1. Compute & Logic
 
-    1x STM32 Nucleo-64 board (recommended: NUCLEO-F401RE or NUCLEO-G474RE)
-    1x FPGA development board (e.g. TinyFPGA BX, Sipeed Tang Nano, or Digilent Basys 3)
+    1x STM32 Nucleo-64 board (NUCLEO-F767ZI)
+    1x FPGA development board (e.g. TinyFPGA BX, Sipeed Tang Nano, or Digilent Basys 3) -> desicon not made yet, as focus is pointed to the embedded software in first step
 
 2. User Interface & Display
 
@@ -312,13 +310,13 @@ Response time  Milliseconds (good enough for humans)  Nanoseconds (needed for si
 Arithmetic     Floating point                Integer
 Parallelism    Sequential                    Parallel
 
-## Systemoverview
+## System Overview
 
-       USER INPUT                      ANZEIGE
+       USER INPUT                      DISPLAY
     +--------------+              +---------------+
 
-    | Drehgeber    |              | OLED Display  |
-    | (Frequenz)   |              | (SSD1306)     |
+    | Rotary       |              | OLED Display  |
+    | Encoder      |              | (SSD1306)     |
     +-------+------+              +-------+-------+
 
             |                             ^
@@ -328,46 +326,44 @@ Parallelism    Sequential                    Parallel
 
     |                                             |
     |           STM32 F767ZI (NUCLEO)             |
-    |               "The Brain"                   |
+    |                                              |
     |                                             |
-    |  - Berechnet Frequenz-Inkrement (M)         |
-    |  - Verwaltet Menü & Benutzereingaben        |
-    |  - Master der Kommunikation                 |
+    |  - Calculates the frequency tuning word    |
+    |  - Handles menu and user input             |
+    |  - Acts as the communication master        |
     |                                             |
     +----------------------+----------------------+
 
                            |
-                           | SPI BUS (Inkrement M & Befehle)
+                           | SPI BUS (tuning word and commands)
                            v
     +----------------------+----------------------+
 
     |                                             |
     |                FPGA (VHDL)                  |
-    |               "The Muscle"                  |
     |                                             |
-    |  - SPI-Slave Empfänger                      |
-    |  - Echtzeit-Phasenakkumulator (DDS)         |
-    |  - Wellenform Look-Up Table (LUT)           |
+    |                                             |
+    |  - SPI slave receiver                      |
+    |  - Real-time phase accumulator (DDS)       |
+    |  - Waveform lookup table (LUT)             |
     |                                             |
     +----------------------+----------------------+
 
                            |
-                           | 8-Bit Parallel (Daten @ 50MHz+)
+                           | 8-bit parallel data (50 MHz+)
                            v
     +----------------------+----------------------+
 
-    |             R2R-Widerstands-DAC             |
-    |         (Wandelt Digital -> Analog)         |
+    |           R2R Resistor DAC                 |
+    |       (Converts digital to analog)         |
     +----------------------+----------------------+
                            |
                            v
-                    ANALOGES SIGNAL
-                   (Sinus / Rechteck)
+                    ANALOG SIGNAL
+                   (Sine / Square)
 
-1. Input: Der Nutzer ändert die Frequenz am Drehgeber.
-2. Logic: Der STM32 berechnet das Tuning-Wort
-und schickt es via SPI los
-3. Hardware: Das FPGA addiert
-in jedem Taktzyklus auf einen Zähler und liest den passenden Amplitudenwert aus dem Speicher.
-4. Output: Die 8-Bit-Werte werden zeitgleich an das Widerstandsnetzwerk ausgegeben
+1. Input: The user changes the frequency with the rotary encoder.
+2. Logic: The STM32 calculates the tuning word and sends it via SPI.
+3. Hardware: The FPGA accumulates the phase in every clock cycle and reads the corresponding amplitude value from memory.
+4. Output: The 8-bit values are driven simultaneously to the resistor network.
 
