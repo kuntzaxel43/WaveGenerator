@@ -23,7 +23,6 @@
 #include "usb_otg.h"
 #include "gpio.h"
 #include "retarget.h"
-#include "usart.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -97,11 +96,10 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART3_UART_Init();
-  /*uart is initialized, now redirect printf to platform related iterface*/
-  Retarget_Init(&huart3);
   MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
-
+  Retarget_Init(&huart3);
+  printf("UART retargeting initialized\r\n");
   /* USER CODE END 2 */
 
   /* Init scheduler */
