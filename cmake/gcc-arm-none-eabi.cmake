@@ -5,8 +5,13 @@ set(CMAKE_C_COMPILER_ID GNU)
 set(CMAKE_CXX_COMPILER_ID GNU)
 
 # Some default GCC settings
-# arm-none-eabi- must be part of path environment
-set(TOOLCHAIN_PREFIX                arm-none-eabi-)
+# arm-none-eabi- must be part of path environment, or can be overridden via
+# the ARM_NONE_EABI_TOOLCHAIN_PREFIX environment variable.
+if(DEFINED ENV{ARM_NONE_EABI_TOOLCHAIN_PREFIX} AND NOT "$ENV{ARM_NONE_EABI_TOOLCHAIN_PREFIX}" STREQUAL "")
+  set(TOOLCHAIN_PREFIX "$ENV{ARM_NONE_EABI_TOOLCHAIN_PREFIX}")
+else()
+  set(TOOLCHAIN_PREFIX "arm-none-eabi-")
+endif()
 
 set(CMAKE_C_COMPILER                ${TOOLCHAIN_PREFIX}gcc)
 set(CMAKE_ASM_COMPILER              ${CMAKE_C_COMPILER})

@@ -61,6 +61,9 @@ const osThreadAttr_t MainTask_attributes = {
 
 /* USER CODE END FunctionPrototypes */
 
+/*global variable to ensure, GPIO ISR is executed properly*/
+extern volatile uint32_t GPIO_TestVariable;
+
 void StartDefaultTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -121,9 +124,11 @@ void StartDefaultTask(void *argument)
     //printf("Hallo aus der Endlosschleife!\n");
     //fflush(stdout); // Erzwingt das sofortige Senden des Puffers
     //HAL_UART_Transmit(&huart3, (uint8_t*)"Test\r\n", 6, 100);
-    printf("MainTask started, now entering for loop\n");
+    printf("MainTask1 started, now entering for loop\n");
     
     osDelay(1000); // Wartet genau 1 Sekunde (1000ms)
+    
+    printf("IO: %lu\r\n", GPIO_TestVariable);
   }
   /* USER CODE END StartDefaultTask */
 }

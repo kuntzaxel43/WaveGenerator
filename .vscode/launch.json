@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Flash STM32 (ST-Link)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build/Debug/WaveGenerator.elf",
+      "servertype": "stlink",
+      "serverpath": "C:\\Users\\axelk\\AppData\\Local\\stm32cube\\bundles\\stlink-gdbserver\\7.14.0+st.2\\bin\\ST-LINK_gdbserver.exe",
+      "runToMain": true,
+      "preLaunchTask": "build Debug"
+    }
+  ]
+}

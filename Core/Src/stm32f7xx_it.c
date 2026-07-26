@@ -60,7 +60,8 @@ extern TIM_HandleTypeDef htim6;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
-
+/*extern definition of test variable to ensure, GPIO ISR is executed properly*/
+volatile extern uint32_t GPIO_TestVariable = 0;
 /******************************************************************************/
 /*           Cortex-M7 Processor Interruption and Exception Handlers          */
 /******************************************************************************/
@@ -165,11 +166,11 @@ void DebugMon_Handler(void)
 void EXTI2_IRQHandler(void)
 {
   /* USER CODE BEGIN EXTI2_IRQn 0 */
-
+  HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
   /* USER CODE END EXTI2_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(ENCODER_CLK_Pin);
   /* USER CODE BEGIN EXTI2_IRQn 1 */
-
+  GPIO_TestVariable++; /*increment test variable to ensure, GPIO ISR is executed properly*/
   /* USER CODE END EXTI2_IRQn 1 */
 }
 
